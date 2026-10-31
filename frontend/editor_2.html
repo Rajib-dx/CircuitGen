@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>circuitGen Live Editor</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/jointjs/3.7.0/joint.min.css">
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; display: flex; height: 100vh; font-family: sans-serif; background: #f4f6fa; overflow: hidden; }
+        
+        /* Left Library Sidebar */
+        #sidebar { width: 220px; background: #fff; border-right: 1px solid #ddd; display: flex; flex-direction: column; }
+        .sidebar-header { padding: 15px; background: #f8f9fa; border-bottom: 1px solid #ddd; font-weight: bold; font-size: 13px; }
+        .component-list { padding: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; overflow-y: auto; }
+        .comp-item { border: 1px solid #eee; padding: 10px; text-align: center; cursor: grab; border-radius: 4px; background: #fff; font-size: 12px; }
+        .comp-item:hover { border-color: #2563eb; background: #eff5ff; }
+        .comp-item svg { display: block; margin: 0 auto 5px auto; width: 40px; height: 20px; }
+        
+        /* Main Workspace */
+        #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+        #toolbar { height: 50px; border-bottom: 1px solid #ddd; background: #fff; display: flex; align-items: center; padding: 0 15px; justify-content: space-between; }
+        .mode-tools { display: flex; gap: 8px; align-items: center; }
+        #canvas-wrapper { flex: 1; overflow: auto; position: relative; background-color: #ffffff; background-image: radial-gradient(#ccc 1px, transparent 1px); background-size: 20px 20px; }
+        #paper { width: 3000px; height: 2000px; }
+        
+        /* Right Properties Inspector Panel */
+        #inspector { width: 250px; background: #fff; border-left: 1px solid #ddd; display: flex; flex-direction: column; padding: 15px; gap: 15px; }
+        .inspector-header { font-weight: bold; font-size: 13px; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+        .field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: #555; }
+        .field input { padding: 6px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; outline: none; }
+        .field input:focus { border-color: #2563eb; }
+        
+        button { padding: 8px 14px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 12px; }
+        button:hover { background: #1d4ed8; }
+        button.active-mode { background: #15803d !important; }
+        .danger-btn { background: #dc2626; }
+        .danger-btn:hover { background: #b91c1c; }
+        
+        .inspector-empty { color: #888; font-size: 12px; text-align: center; margin-top: 40px; }
+    </style>
+</head>
+<body>
+
+    <!-- Left Sidebar Library -->
+    <div id="sidebar">
+        <div class="sidebar-header">Components Library</div>
+        <div class="component-list" id="drag-items"></div>
+    </div>
+
+    <!-- Center Workspace -->
+    <div id="main">
+        <div id="toolbar">
+            <div class="mode-tools">
+                <strong>circuitGen Workspace</strong>
+                <span style="color:#ccc">|</span>
+                <button id="btn-select" class="active-mode" onclick="setMode('select')">Select & Move</button>
+                <button id="btn-wire" onclick="setMode('wire')">Wire Mode</button>
+            </div>
+            <button onclick="exportSVG()">Export Edited Schematic</button>
+        </div>
+        <div id="canvas-wrapper">
+            <div id="paper"></div>
+        </div>
+    </div>
+
+    <!-- Right Properties Inspector -->
+    <div id="inspector">
+        <div class="inspector-header">Properties</div>
+        <div id="inspector-content" class="inspector-empty">Select a component on the canvas to edit its name or value.</div>
+    </div>
+
+<!-- JointJS Dependencies -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/backbone.js/1.4.1/backbone-min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jointjs/3.7.0/joint.min.js"></script>
+
+    <script>
+        const SYMBOLS = {
+            resistor: 'M 0 20 L 10 20 L 15 10 L 25 30 L 35 10 L 45 30 L 55 10 L 65 30 L 70 20 L 80 20',
+            capacitor: 'M 0 20 L 35 20 M 45 20 L 80 20 M 35 5 L 35 35 M 45 5 L 45 35',
+            ground: 'M 40 0 L 40 20 M 25 20 L 55 20 M 30 27 L 50 27 M 35 34 L 45 34',
+            diode: 'M 0 20 L 30 20 M 50 20 L 80 20 M 30 10 L 30 30 L 50 20 Z M 50 10 L 50 30',
+            opamp: 'M 10 10 L 10 70 L 70 40 Z M 0 25 L 10 25 M 0 55 L 10 55 M 70 40 L 80 40'
+        };
+
+        const graph = new joint.dia.Graph();
+        const paper = new joint.dia.Paper({
+            el: document.getElementById('paper'),
+            model: graph,
+            width: 3000,
+            height: 2000,
+            gridSize: 20,
+            drawGrid: false,
+            snapLinks: { radius: 25 },
+            defaultLink: new joint.shapes.standard.Link({
+                router: { name: 'manhattan', args: { step: 20 } },
+                connector: { name: 'rounded' },
+                attrs: { line: { stroke: '#1a5c1a', strokeWidth: 2, targetMarker: { type: 'none' } } }
+            }),
+            interactive: function(cellView) {
+                // If in wire mode, prevent element dragging so clicks register cleanly
+                if (currentMode === 'wire') {
+                    return { elementMove: false };
+                }
+                return { elementMove: true };
+            }
+        });
+
+        let currentMode = 'select'; // 'select' or 'wire'
+        let selectedElement = null;
+        let wireSourceElement = null;
+
+        function setMode(mode) {
+            currentMode = mode;
+            if (wireSourceElement) {
+                wireSourceElement.attr('body/stroke', '#000000');
+                wireSourceElement.attr('body/strokeWidth', 2);
+                wireSourceElement = null;
+            }
+            document.getElementById('btn-select').classList.toggle('active-mode', mode === 'select');
+            document.getElementById('btn-wire').classList.toggle('active-mode', mode === 'wire');
+
+            // Visual cursor cue
+            document.getElementById('paper').style.cursor = mode === 'wire' ? 'crosshair' : 'default';
+        }
+
+        // Element interaction handler
+        paper.on('cell:pointerup', function(cellView, evt, x, y) {
+            if (!cellView.model.isElement()) return;
+            const element = cellView.model;
+
+            if (currentMode === 'select') {
+                selectElement(element);
+            } else if (currentMode === 'wire') {
+                if (!wireSourceElement) {
+                    wireSourceElement = element;
+                    element.attr('body/stroke', '#15803d'); // Highlight source green
+                    element.attr('body/strokeWidth', 3);
+                } else if (wireSourceElement.id !== element.id) {
+                    const link = paper.options.defaultLink.clone();
+                    link.set({
+                        source: { id: wireSourceElement.id },
+                        target: { id: element.id }
+                    });
+                    link.addTo(graph);
+
+                    // Reset highlight
+                    wireSourceElement.attr('body/stroke', '#000000');
+                    wireSourceElement.attr('body/strokeWidth', 2);
+                    wireSourceElement = null;
+                }
+            }
+        });
+
+        // Deselect when clicking on canvas background
+        paper.on('blank:pointerdown', function() {
+            if (currentMode === 'select') {
+                clearSelection();
+            }
+            if (wireSourceElement) {
+                wireSourceElement.attr('body/stroke', '#000000');
+                wireSourceElement.attr('body/strokeWidth', 2);
+                wireSourceElement = null;
+            }
+        });
+
+        function selectElement(element) {
+            if (selectedElement && selectedElement.id === element.id) return;
+            clearSelection();
+            selectedElement = element;
+            selectedElement.attr('body/stroke', '#2563eb'); // Highlight selected blue
+            selectedElement.attr('body/strokeWidth', 3);
+            showInspector(selectedElement);
+        }
+
+        function clearSelection() {
+            if (selectedElement) {
+                selectedElement.attr('body/stroke', '#000000');
+                selectedElement.attr('body/strokeWidth', 2);
+                selectedElement = null;
+            }
+            document.getElementById('inspector-content').innerHTML = '<div class="inspector-empty">Select a component on the canvas to edit its name or value.</div>';
+        }
+
+        function showInspector(element) {
+            const currentLabel = element.attr('label/text') || '';
+            const parts = currentLabel.split('\n');
+            const idVal = parts[0] || '';
+            const valVal = parts[1] || '';
+
+            const container = document.getElementById('inspector-content');
+            container.innerHTML = `
+                <div class="field">
+                    <label>Reference / Name</label>
+                    <input type="text" id="edit-id" value="${idVal}">
+                </div>
+                <div class="field">
+                    <label>Value / Specs</label>
+                    <input type="text" id="edit-val" value="${valVal}">
+                </div>
+                <button class="danger-btn" onclick="deleteSelectedElement()">Delete Component</button>
+            `;
+
+            document.getElementById('edit-id').addEventListener('input', (e) => {
+                const val = document.getElementById('edit-val').value;
+                element.attr('label/text', `${e.target.value}\n${val}`);
+            });
+
+            document.getElementById('edit-val').addEventListener('input', (e) => {
+                const id = document.getElementById('edit-id').value;
+                element.attr('label/text', `${id}\n${e.target.value}`);
+            });
+        }
+
+        window.deleteSelectedElement = function() {
+            if (selectedElement) {
+                selectedElement.remove();
+                clearSelection();
+            }
+        };
+
+        function createShape(type, x, y, labelText) {
+            const cleanType = (type || 'resistor').toLowerCase();
+            const pathData = SYMBOLS[cleanType] || SYMBOLS['resistor'];
+
+            const shape = new joint.shapes.standard.Path({
+                position: { x: x || 100, y: y || 100 },
+                size: { width: 90, height: 50 },
+                attrs: {
+                    body: {
+                        refD: pathData,
+                        fill: '#ffffff',
+                        stroke: '#000000',
+                        strokeWidth: 2,
+                        magnet: false // Setting to false restores clean mouse drag functionality
+                    },
+                    label: {
+                        text: labelText || cleanType.toUpperCase(),
+                        refY: -22,
+                        fill: '#000080',
+                        fontSize: 12,
+                        fontWeight: 'bold',
+                        pointerEvents: 'none' // Ensures label does not intercept drags
+                    }
+                }
+            });
+            return shape;
+        }
+
+        // Populate Sidebar Library
+        const dragContainer = document.getElementById('drag-items');
+        Object.keys(SYMBOLS).forEach(type => {
+            const div = document.createElement('div');
+            div.className = 'comp-item';
+            div.draggable = true;
+            div.dataset.type = type;
+            div.innerHTML = `<svg viewBox="0 0 80 40"><path d="${SYMBOLS[type]}" fill="transparent" stroke="#000" stroke-width="2"/></svg>${type}`;
+            div.addEventListener('dragstart', (e) => e.dataTransfer.setData('type', type));
+            dragContainer.appendChild(div);
+        });
+
+        // Drag and Drop from Sidebar to Canvas
+        const paperEl = document.getElementById('paper');
+        const wrapperEl = document.getElementById('canvas-wrapper');
+
+        wrapperEl.addEventListener('dragover', (e) => e.preventDefault());
+        wrapperEl.addEventListener('drop', (e) => {
+            e.preventDefault();
+            const type = e.dataTransfer.getData('type');
+            if (type) {
+                const rect = paperEl.getBoundingClientRect();
+                const x = Math.round((e.clientX - rect.left + wrapperEl.scrollLeft) / 20) * 20;
+                const y = Math.round((e.clientY - rect.top + wrapperEl.scrollTop) / 20) * 20;
+                const shape = createShape(type, x, y, `${type.toUpperCase()}1\n10k`);
+                shape.addTo(graph);
+                selectElement(shape);
+            }
+        });
+
+        // Load circuit data sent from chat
+        window.onload = () => {
+            const savedData = localStorage.getItem('current_circuit_interactive');
+            if (savedData) {
+                try {
+                    const decoded = savedData.includes('%') ? decodeURIComponent(savedData) : savedData;
+                    const data = JSON.parse(decoded);
+                    const elementMap = {};
+
+                    if (data.components && Array.isArray(data.components)) {
+                        data.components.forEach(comp => {
+                            const label = `${comp.id || ''}\n${comp.value || ''}`.trim();
+                            const shape = createShape(comp.type, comp.x, comp.y, label || comp.id);
+                            shape.addTo(graph);
+                            elementMap[comp.id] = shape.id;
+                        });
+                    }
+
+                    if (data.wires && Array.isArray(data.wires)) {
+                        data.wires.forEach(wire => {
+                            if (elementMap[wire.source_id] && elementMap[wire.target_id]) {
+                                const link = paper.options.defaultLink.clone();
+                                link.set({
+                                    source: { id: elementMap[wire.source_id] },
+                                    target: { id: elementMap[wire.target_id] }
+                                });
+                                link.addTo(graph);
+                            }
+                        });
+                    }
+                } catch (err) {
+                    console.error("Error parsing interactive circuit layout:", err);
+                }
+            }
+        };
+
+        function exportSVG() {
+            const svgElement = document.querySelector('#paper svg');
+            if (!svgElement) {
+                alert("Canvas is empty.");
+                return;
+            }
+            const clonedSvg = svgElement.cloneNode(true);
+            clonedSvg.style.backgroundColor = "#ffffff";
+            const serializer = new XMLSerializer();
+            let svgString = '<?xml version="1.0" standalone="no"?>\r\n' + serializer.serializeToString(clonedSvg);
+            const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = "circuitGen_edited.svg";
+            link.click();
+        }
+    </script>
+</body>
+</html>
